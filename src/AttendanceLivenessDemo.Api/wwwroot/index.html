@@ -1,0 +1,358 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Attendance Liveness WebSocket Demo</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card: #111827;
+      --muted: #94a3b8;
+      --text: #e5e7eb;
+      --ok: #22c55e;
+      --warn: #f59e0b;
+      --bad: #ef4444;
+      --accent: #38bdf8;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: radial-gradient(circle at top, #1e293b 0, var(--bg) 55%);
+      color: var(--text);
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 20px;
+    }
+    .app {
+      width: min(1100px, 100%);
+      display: grid;
+      grid-template-columns: 420px 1fr;
+      gap: 18px;
+      align-items: start;
+    }
+    .card {
+      background: rgba(17, 24, 39, 0.92);
+      border: 1px solid rgba(148, 163, 184, .2);
+      border-radius: 22px;
+      box-shadow: 0 20px 70px rgba(0,0,0,.35);
+      overflow: hidden;
+    }
+    .video-wrap {
+      position: relative;
+      background: #020617;
+      aspect-ratio: 3/4;
+      display: grid;
+      place-items: center;
+    }
+    video {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      transform: scaleX(-1);
+    }
+    canvas { display: none; }
+    .oval {
+      position: absolute;
+      width: 68%;
+      height: 58%;
+      border-radius: 50%;
+      border: 3px solid rgba(56, 189, 248, .95);
+      box-shadow: 0 0 0 999px rgba(0,0,0,.18), 0 0 35px rgba(56,189,248,.35);
+      pointer-events: none;
+    }
+    .badge {
+      position: absolute;
+      top: 14px;
+      left: 14px;
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: rgba(2, 6, 23, .75);
+      border: 1px solid rgba(148, 163, 184, .25);
+      font-size: 13px;
+    }
+    .content { padding: 18px; }
+    h1 { margin: 0 0 8px; font-size: 24px; }
+    h2 { margin: 0 0 12px; font-size: 18px; }
+    p { color: var(--muted); line-height: 1.55; }
+    .status {
+      margin: 14px 0;
+      padding: 16px;
+      border-radius: 16px;
+      background: rgba(15, 23, 42, .9);
+      border: 1px solid rgba(148, 163, 184, .15);
+      font-size: 22px;
+      font-weight: 800;
+    }
+    .message { color: var(--muted); font-size: 15px; margin-top: 6px; }
+    .actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 14px; }
+    button {
+      border: 0;
+      border-radius: 12px;
+      padding: 12px 16px;
+      cursor: pointer;
+      font-weight: 700;
+      color: #07111f;
+      background: var(--accent);
+    }
+    button.secondary { background: #334155; color: var(--text); }
+    button:disabled { opacity: .55; cursor: not-allowed; }
+    .grid { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 10px; }
+    .metric {
+      padding: 12px;
+      border-radius: 14px;
+      background: rgba(15, 23, 42, .75);
+      border: 1px solid rgba(148, 163, 184, .12);
+    }
+    .metric .label { color: var(--muted); font-size: 12px; }
+    .metric .value { font-size: 20px; font-weight: 800; margin-top: 4px; }
+    .steps { display: grid; gap: 8px; margin-top: 14px; }
+    .step {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 10px 12px; border-radius: 12px;
+      background: rgba(15, 23, 42, .7);
+      color: var(--muted);
+    }
+    .step.active { color: white; outline: 2px solid rgba(56, 189, 248, .5); }
+    .step.done { color: var(--ok); }
+    pre {
+      max-height: 260px;
+      overflow: auto;
+      padding: 14px;
+      border-radius: 14px;
+      background: #020617;
+      color: #cbd5e1;
+      font-size: 12px;
+    }
+    @media (max-width: 860px) { .app { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <main class="app">
+    <section class="card">
+      <div class="video-wrap">
+        <video id="video" autoplay playsinline muted></video>
+        <div class="oval"></div>
+        <div class="badge" id="connectionBadge">Idle</div>
+      </div>
+      <canvas id="canvas" width="320" height="240"></canvas>
+      <div class="content">
+        <h1>Chấm công eKYC demo</h1>
+        <p>Browser gửi frame JPEG qua WebSocket. Backend .NET giữ active challenge, gọi AI worker CPU để check face/liveness.</p>
+        <div class="actions">
+          <button id="startBtn">Bắt đầu</button>
+          <button class="secondary" id="stopBtn" disabled>Dừng</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="card content">
+      <h2>Trạng thái realtime</h2>
+      <div class="status" id="statusTitle">Chưa bắt đầu</div>
+      <div class="message" id="statusMessage">Bấm “Bắt đầu” và cho phép camera.</div>
+
+      <div class="steps" id="steps"></div>
+
+      <h2 style="margin-top:22px">Metrics</h2>
+      <div class="grid">
+        <div class="metric"><div class="label">Yaw</div><div class="value" id="yaw">-</div></div>
+        <div class="metric"><div class="label">Pitch</div><div class="value" id="pitch">-</div></div>
+        <div class="metric"><div class="label">EAR / Blink</div><div class="value" id="ear">-</div></div>
+        <div class="metric"><div class="label">Liveness</div><div class="value" id="live">-</div></div>
+        <div class="metric"><div class="label">Spoof</div><div class="value" id="spoof">-</div></div>
+        <div class="metric"><div class="label">Quality</div><div class="value" id="quality">-</div></div>
+        <div class="metric"><div class="label">Frames</div><div class="value" id="frames">-</div></div>
+      </div>
+
+      <h2 style="margin-top:22px">Server log</h2>
+      <pre id="log"></pre>
+    </section>
+  </main>
+
+<script>
+  const els = {
+    video: document.getElementById('video'),
+    canvas: document.getElementById('canvas'),
+    badge: document.getElementById('connectionBadge'),
+    startBtn: document.getElementById('startBtn'),
+    stopBtn: document.getElementById('stopBtn'),
+    statusTitle: document.getElementById('statusTitle'),
+    statusMessage: document.getElementById('statusMessage'),
+    steps: document.getElementById('steps'),
+    yaw: document.getElementById('yaw'),
+    pitch: document.getElementById('pitch'),
+    ear: document.getElementById('ear'),
+    live: document.getElementById('live'),
+    spoof: document.getElementById('spoof'),
+    quality: document.getElementById('quality'),
+    frames: document.getElementById('frames'),
+    log: document.getElementById('log'),
+  };
+
+  let ws;
+  let stream;
+  let timer;
+  let seq = 0;
+  let challenge = [];
+  const uploadIntervalMs = 170; // ~6 fps, hợp lý cho CPU server
+
+  els.startBtn.addEventListener('click', start);
+  els.stopBtn.addEventListener('click', stop);
+
+  async function start() {
+    setBusy(true);
+    log('Starting session...');
+
+    try {
+      const sessionResp = await fetch('/api/session/start', { method: 'POST' });
+      const session = await sessionResp.json();
+      challenge = session.challenge || [];
+      renderSteps(0);
+
+      stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: 'user',
+          width: { ideal: 640 },
+          height: { ideal: 480 }
+        },
+        audio: false
+      });
+
+      els.video.srcObject = stream;
+      await els.video.play();
+
+      ws = new WebSocket(session.wsUrl);
+      ws.binaryType = 'arraybuffer';
+
+      ws.onopen = () => {
+        els.badge.textContent = 'Connected';
+        log('WebSocket connected: ' + session.wsUrl);
+        ws.send(JSON.stringify({
+          type: 'START',
+          employeeId: 'EMP001',
+          deviceId: 'browser-demo',
+          clientTime: new Date().toISOString()
+        }));
+        timer = setInterval(captureAndSendFrame, uploadIntervalMs);
+      };
+
+      ws.onmessage = (event) => {
+        const msg = JSON.parse(event.data);
+        handleServerMessage(msg);
+      };
+
+      ws.onerror = () => log('WebSocket error');
+      ws.onclose = () => {
+        els.badge.textContent = 'Disconnected';
+        setBusy(false);
+        if (timer) clearInterval(timer);
+        log('WebSocket closed');
+      };
+    } catch (err) {
+      log('ERROR: ' + (err.message || err));
+      setBusy(false);
+    }
+  }
+
+  function captureAndSendFrame() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+
+    // Nếu mạng/server chậm, bỏ frame để không backlog RAM.
+    if (ws.bufferedAmount > 2 * 1024 * 1024) {
+      log('Skip frame: websocket bufferedAmount too high');
+      return;
+    }
+
+    const canvas = els.canvas;
+    const ctx = canvas.getContext('2d', { willReadFrequently: false });
+    ctx.drawImage(els.video, 0, 0, canvas.width, canvas.height);
+
+    canvas.toBlob(async (blob) => {
+      if (!blob || !ws || ws.readyState !== WebSocket.OPEN) return;
+
+      ws.send(JSON.stringify({
+        type: 'FRAME_META',
+        seq,
+        timestampMs: Date.now(),
+        mime: 'image/jpeg'
+      }));
+
+      const buffer = await blob.arrayBuffer();
+      ws.send(buffer);
+      seq++;
+    }, 'image/jpeg', 0.68);
+  }
+
+  function handleServerMessage(msg) {
+    log(JSON.stringify(msg));
+
+    if (msg.type === 'PROGRESS') {
+      els.statusTitle.textContent = msg.currentTitle || msg.currentAction || msg.code;
+      els.statusMessage.textContent = msg.message || msg.code;
+      renderSteps(msg.currentStepIndex || 0);
+      updateMetrics(msg);
+    }
+
+    if (msg.type === 'FINAL') {
+      els.statusTitle.textContent = msg.passed ? 'PASSED' : 'FAILED';
+      els.statusMessage.textContent = msg.message;
+      els.statusTitle.style.color = msg.passed ? 'var(--ok)' : 'var(--bad)';
+      updateMetrics(msg);
+      stop(false);
+    }
+
+    if (msg.type === 'ERROR') {
+      els.statusTitle.textContent = msg.code;
+      els.statusMessage.textContent = msg.message;
+      els.statusTitle.style.color = 'var(--bad)';
+    }
+  }
+
+  function updateMetrics(msg) {
+    const a = msg.analysis || {};
+    els.yaw.textContent = isNum(a.yaw) ? a.yaw.toFixed(1) + '°' : '-';
+    els.pitch.textContent = isNum(a.pitch) ? a.pitch.toFixed(1) + '°' : '-';
+    els.ear.textContent = isNum(a.eyeAspectRatio) ? a.eyeAspectRatio.toFixed(3) + (a.blink ? ' / blink' : '') : '-';
+    els.live.textContent = isNum(a.livenessScore) ? a.livenessScore.toFixed(3) : '-';
+    els.spoof.textContent = isNum(a.spoofScore) ? a.spoofScore.toFixed(3) : '-';
+    els.quality.textContent = isNum(a.qualityScore) ? a.qualityScore.toFixed(3) : '-';
+    els.frames.textContent = msg.totalFrames ?? '-';
+  }
+
+  function renderSteps(activeIndex) {
+    els.steps.innerHTML = '';
+    challenge.forEach((s, i) => {
+      const div = document.createElement('div');
+      div.className = 'step' + (i === activeIndex ? ' active' : '') + (i < activeIndex ? ' done' : '');
+      div.innerHTML = `<span>${i + 1}. ${s.title}</span><small>${s.type}</small>`;
+      els.steps.appendChild(div);
+    });
+  }
+
+  function stop(closeWs = true) {
+    if (timer) clearInterval(timer);
+    timer = null;
+    if (closeWs && ws) ws.close();
+    ws = null;
+    if (stream) stream.getTracks().forEach(t => t.stop());
+    stream = null;
+    setBusy(false);
+  }
+
+  function setBusy(busy) {
+    els.startBtn.disabled = busy;
+    els.stopBtn.disabled = !busy;
+    if (!busy && !ws) els.badge.textContent = 'Idle';
+  }
+
+  function isNum(v) { return typeof v === 'number' && Number.isFinite(v); }
+
+  function log(s) {
+    const line = `[${new Date().toLocaleTimeString()}] ${s}\n`;
+    els.log.textContent = line + els.log.textContent;
+  }
+</script>
+</body>
+</html>
