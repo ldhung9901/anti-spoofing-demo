@@ -87,7 +87,17 @@
       font-weight: 800;
     }
     .message { color: var(--muted); font-size: 15px; margin-top: 6px; }
-    .actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 14px; }
+	    .actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 14px; }
+	    .field { display: grid; gap: 6px; margin-top: 12px; }
+	    label { color: var(--muted); font-size: 12px; font-weight: 700; }
+	    input {
+	      width: 100%;
+	      border: 1px solid rgba(148, 163, 184, .25);
+	      border-radius: 12px;
+	      background: rgba(15, 23, 42, .9);
+	      color: var(--text);
+	      padding: 11px 12px;
+	    }
     button {
       border: 0;
       border-radius: 12px;
@@ -139,12 +149,21 @@
       </div>
       <canvas id="canvas" width="320" height="240"></canvas>
       <div class="content">
-        <h1>Chấm công eKYC demo</h1>
-        <p>Browser gửi frame JPEG qua WebSocket. Backend .NET giữ active challenge, gọi AI worker CPU để check face/liveness.</p>
-        <div class="actions">
-          <button id="startBtn">Bắt đầu</button>
-          <button class="secondary" id="stopBtn" disabled>Dừng</button>
-        </div>
+	        <h1>Chấm công eKYC demo</h1>
+	        <p>Browser gửi frame JPEG qua WebSocket. Backend .NET giữ active challenge, gọi AI worker CPU để check face/liveness.</p>
+	        <div class="field">
+	          <label for="employeeId">Employee ID</label>
+	          <input id="employeeId" value="EMP001" autocomplete="off" />
+	        </div>
+	        <div class="field">
+	          <label for="referenceFace">Ảnh khuôn mặt chuẩn</label>
+	          <input id="referenceFace" type="file" accept="image/*" />
+	        </div>
+	        <div class="actions">
+	          <button class="secondary" id="enrollBtn">Upload face</button>
+	          <button id="startBtn">Bắt đầu</button>
+	          <button class="secondary" id="stopBtn" disabled>Dừng</button>
+	        </div>
       </div>
     </section>
 
@@ -161,9 +180,10 @@
         <div class="metric"><div class="label">Pitch</div><div class="value" id="pitch">-</div></div>
         <div class="metric"><div class="label">EAR / Blink</div><div class="value" id="ear">-</div></div>
         <div class="metric"><div class="label">Liveness</div><div class="value" id="live">-</div></div>
-        <div class="metric"><div class="label">Spoof</div><div class="value" id="spoof">-</div></div>
-        <div class="metric"><div class="label">Quality</div><div class="value" id="quality">-</div></div>
-        <div class="metric"><div class="label">Frames</div><div class="value" id="frames">-</div></div>
+	        <div class="metric"><div class="label">Spoof</div><div class="value" id="spoof">-</div></div>
+	        <div class="metric"><div class="label">Face match</div><div class="value" id="faceMatch">-</div></div>
+	        <div class="metric"><div class="label">Quality</div><div class="value" id="quality">-</div></div>
+	        <div class="metric"><div class="label">Frames</div><div class="value" id="frames">-</div></div>
       </div>
 
       <h2 style="margin-top:22px">Server log</h2>
@@ -175,8 +195,11 @@
   const els = {
     video: document.getElementById('video'),
     canvas: document.getElementById('canvas'),
-    badge: document.getElementById('connectionBadge'),
-    startBtn: document.getElementById('startBtn'),
+	    badge: document.getElementById('connectionBadge'),
+	    employeeId: document.getElementById('employeeId'),
+	    referenceFace: document.getElementById('referenceFace'),
+	    enrollBtn: document.getElementById('enrollBtn'),
+	    startBtn: document.getElementById('startBtn'),
     stopBtn: document.getElementById('stopBtn'),
     statusTitle: document.getElementById('statusTitle'),
     statusMessage: document.getElementById('statusMessage'),
@@ -184,9 +207,10 @@
     yaw: document.getElementById('yaw'),
     pitch: document.getElementById('pitch'),
     ear: document.getElementById('ear'),
-    live: document.getElementById('live'),
-    spoof: document.getElementById('spoof'),
-    quality: document.getElementById('quality'),
+	    live: document.getElementById('live'),
+	    spoof: document.getElementById('spoof'),
+	    faceMatch: document.getElementById('faceMatch'),
+	    quality: document.getElementById('quality'),
     frames: document.getElementById('frames'),
     log: document.getElementById('log'),
   };
@@ -198,16 +222,48 @@
   let challenge = [];
   const uploadIntervalMs = 170; // ~6 fps, hợp lý cho CPU server
 
-  els.startBtn.addEventListener('click', start);
-  els.stopBtn.addEventListener('click', stop);
+	  els.enrollBtn.addEventListener('click', enrollFace);
+	  els.startBtn.addEventListener('click', start);
+	  els.stopBtn.addEventListener('click', stop);
+
+	  async function enrollFace() {
+	    const employeeId = getEmployeeId();
+	    const file = els.referenceFace.files && els.referenceFace.files[0];
+	    if (!file) {
+	      log('ERROR: chọn ảnh khuôn mặt chuẩn trước');
+	      return;
+	    }
+
+	    els.enrollBtn.disabled = true;
+	    try {
+	      const form = new FormData();
+	      form.append('employeeId', employeeId);
+	      form.append('file', file);
+	      const resp = await fetch('/api/face/enroll', { method: 'POST', body: form });
+	      const result = await resp.json();
+	      log('Enroll: ' + JSON.stringify(result));
+	      els.statusTitle.textContent = result.ok ? 'Face uploaded' : 'Enroll failed';
+	      els.statusMessage.textContent = result.message || (result.ok ? 'Có thể bắt đầu eKYC.' : 'Upload face không hợp lệ.');
+	      els.statusTitle.style.color = result.ok ? 'var(--ok)' : 'var(--bad)';
+	    } catch (err) {
+	      log('ERROR: ' + (err.message || err));
+	    } finally {
+	      els.enrollBtn.disabled = false;
+	    }
+	  }
 
   async function start() {
     setBusy(true);
     log('Starting session...');
 
     try {
-      const sessionResp = await fetch('/api/session/start', { method: 'POST' });
-      const session = await sessionResp.json();
+	      const employeeId = getEmployeeId();
+	      const sessionResp = await fetch('/api/session/start', {
+	        method: 'POST',
+	        headers: { 'Content-Type': 'application/json' },
+	        body: JSON.stringify({ employeeId })
+	      });
+	      const session = await sessionResp.json();
       challenge = session.challenge || [];
       renderSteps(0);
 
@@ -230,8 +286,8 @@
         els.badge.textContent = 'Connected';
         log('WebSocket connected: ' + session.wsUrl);
         ws.send(JSON.stringify({
-          type: 'START',
-          employeeId: 'EMP001',
+	          type: 'START',
+	          employeeId,
           deviceId: 'browser-demo',
           clientTime: new Date().toISOString()
         }));
@@ -315,9 +371,12 @@
     els.yaw.textContent = isNum(a.yaw) ? a.yaw.toFixed(1) + '°' : '-';
     els.pitch.textContent = isNum(a.pitch) ? a.pitch.toFixed(1) + '°' : '-';
     els.ear.textContent = isNum(a.eyeAspectRatio) ? a.eyeAspectRatio.toFixed(3) + (a.blink ? ' / blink' : '') : '-';
-    els.live.textContent = isNum(a.livenessScore) ? a.livenessScore.toFixed(3) : '-';
-    els.spoof.textContent = isNum(a.spoofScore) ? a.spoofScore.toFixed(3) : '-';
-    els.quality.textContent = isNum(a.qualityScore) ? a.qualityScore.toFixed(3) : '-';
+	    els.live.textContent = isNum(a.livenessScore) ? a.livenessScore.toFixed(3) : '-';
+	    els.spoof.textContent = isNum(a.spoofScore) ? a.spoofScore.toFixed(3) : '-';
+	    els.faceMatch.textContent = isNum(a.faceMatchScore)
+	      ? a.faceMatchScore.toFixed(3) + (a.faceMatched ? ' / ok' : ' / no')
+	      : '-';
+	    els.quality.textContent = isNum(a.qualityScore) ? a.qualityScore.toFixed(3) : '-';
     els.frames.textContent = msg.totalFrames ?? '-';
   }
 
@@ -347,7 +406,8 @@
     if (!busy && !ws) els.badge.textContent = 'Idle';
   }
 
-  function isNum(v) { return typeof v === 'number' && Number.isFinite(v); }
+	  function isNum(v) { return typeof v === 'number' && Number.isFinite(v); }
+	  function getEmployeeId() { return (els.employeeId.value || 'EMP001').trim(); }
 
   function log(s) {
     const line = `[${new Date().toLocaleTimeString()}] ${s}\n`;
