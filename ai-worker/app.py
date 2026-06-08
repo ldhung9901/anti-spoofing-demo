@@ -47,7 +47,7 @@ HF_MODEL_FILE = os.getenv("HF_MODEL_FILE", "")
 MODEL_DIR = Path(os.getenv("MODEL_DIR", Path(__file__).parent / "models"))
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
-BLINK_EAR_THRESHOLD = float(os.getenv("BLINK_EAR_THRESHOLD", "0.20"))
+BLINK_EAR_THRESHOLD = float(os.getenv("BLINK_EAR_THRESHOLD", "0.18"))
 FACE_MATCH_THRESHOLD = float(os.getenv("FACE_MATCH_THRESHOLD", "0.45"))
 AI_WORKER_CONCURRENCY = max(1, int(os.getenv("AI_WORKER_CONCURRENCY", "4")))
 AI_WORKER_QUEUE_LIMIT = max(AI_WORKER_CONCURRENCY, int(os.getenv("AI_WORKER_QUEUE_LIMIT", "16")))

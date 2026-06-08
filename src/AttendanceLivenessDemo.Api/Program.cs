@@ -523,7 +523,7 @@ public sealed class LivenessSession
         switch (step.Type)
         {
             case ChallengeStepType.CenterFace:
-                stepOk = Math.Abs(analysis.Yaw) < 12 && Math.Abs(analysis.Pitch) < 18;
+                stepOk = Math.Abs(analysis.Yaw) < 12 && Math.Abs(analysis.Pitch) < 35;
                 break;
 
             case ChallengeStepType.TurnLeft:

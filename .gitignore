@@ -1,5 +1,6 @@
 **/bin/
 **/obj/
 **/.venv/
+**/venv/
 **/__pycache__/
 ai-worker/models/*.onnx
