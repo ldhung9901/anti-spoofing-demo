@@ -407,7 +407,7 @@ def analyze_frame(raw: bytes, employee_id: str) -> AnalyzeResponse:
         )
 
     bbox, landmarks, face_count = face
-    yaw, pitch, roll = estimate_head_pose(image, landmarks)
+    yaw, pitch, roll, pose_metrics = estimate_head_pose(image, landmarks)
     ear = compute_eye_aspect_ratio(image, landmarks)
     blink = ear > 0 and ear < BLINK_EAR_THRESHOLD
 
@@ -424,6 +424,7 @@ def analyze_frame(raw: bytes, employee_id: str) -> AnalyzeResponse:
         "bboxH": float(bbox[3]),
         "faceMatchThreshold": float(FACE_MATCH_THRESHOLD),
     }
+    metrics.update(pose_metrics)
     metrics.update(spoof_metrics)
 
     message = model_msg
@@ -562,7 +563,13 @@ def lm_point(image: np.ndarray, landmarks, idx: int) -> Tuple[float, float]:
     return float(lm.x * w), float(lm.y * h)
 
 
-def estimate_head_pose(image: np.ndarray, landmarks) -> Tuple[float, float, float]:
+def estimate_head_pose(image: np.ndarray, landmarks) -> Tuple[float, float, float, dict[str, float]]:
+    landmark_yaw, nose_offset = estimate_landmark_yaw(image, landmarks)
+    landmark_roll = estimate_landmark_roll(image, landmarks)
+
+    raw_yaw = 0.0
+    pitch = 0.0
+    raw_roll = 0.0
     h, w = image.shape[:2]
 
     image_points = np.array([
@@ -594,16 +601,68 @@ def estimate_head_pose(image: np.ndarray, landmarks) -> Tuple[float, float, floa
 
     ok, rvec, tvec = cv2.solvePnP(model_points, image_points, camera_matrix, dist_coeffs, flags=cv2.SOLVEPNP_ITERATIVE)
     if not ok:
-        return 0.0, 0.0, 0.0
+        return landmark_yaw, pitch, landmark_roll, pose_metrics(raw_yaw, landmark_yaw, nose_offset, raw_roll, landmark_roll)
 
-    rot_mat, _ = cv2.Rodrigues(rvec)
-    proj_mat = np.hstack((rot_mat, tvec))
-    _, _, _, _, _, _, euler_angles = cv2.decomposeProjectionMatrix(proj_mat)
+    try:
+        rot_mat, _ = cv2.Rodrigues(rvec)
+        proj_mat = np.hstack((rot_mat, tvec))
+        _, _, _, _, _, _, euler_angles = cv2.decomposeProjectionMatrix(proj_mat)
 
-    pitch = normalize_pitch_angle(float(euler_angles[0][0]))
-    yaw = float(euler_angles[1][0])
-    roll = float(euler_angles[2][0])
-    return yaw, pitch, roll
+        pitch = normalize_pitch_angle(float(euler_angles[0][0]))
+        raw_yaw = float(euler_angles[1][0])
+        raw_roll = normalize_roll_angle(float(euler_angles[2][0]))
+    except Exception as exc:
+        logger.warning("Head pose projection failed: %s", exc)
+
+    return landmark_yaw, pitch, landmark_roll, pose_metrics(raw_yaw, landmark_yaw, nose_offset, raw_roll, landmark_roll)
+
+
+def estimate_landmark_yaw(image: np.ndarray, landmarks) -> Tuple[float, float]:
+    nose_x, _ = lm_point(image, landmarks, 1)
+    left_face_x, _ = lm_point(image, landmarks, 234)
+    right_face_x, _ = lm_point(image, landmarks, 454)
+    left_eye_x, _ = lm_point(image, landmarks, 33)
+    right_eye_x, _ = lm_point(image, landmarks, 263)
+
+    face_left = min(left_face_x, right_face_x)
+    face_right = max(left_face_x, right_face_x)
+    face_width = max(face_right - face_left, abs(right_eye_x - left_eye_x) * 2.4, 1.0)
+    face_center_x = (left_face_x + right_face_x) / 2.0
+    nose_offset = (nose_x - face_center_x) / face_width
+
+    # Positive yaw means "turn right" for the existing backend challenge logic.
+    yaw = clamp(-nose_offset * 120.0, -45.0, 45.0)
+    return yaw, nose_offset
+
+
+def estimate_landmark_roll(image: np.ndarray, landmarks) -> float:
+    left_eye = lm_point(image, landmarks, 33)
+    right_eye = lm_point(image, landmarks, 263)
+    dx = right_eye[0] - left_eye[0]
+    dy = right_eye[1] - left_eye[1]
+    if abs(dx) < 1e-6:
+        return 0.0
+    return normalize_roll_angle(math.degrees(math.atan2(dy, dx)))
+
+
+def pose_metrics(
+    raw_yaw: float,
+    landmark_yaw: float,
+    nose_offset: float,
+    raw_roll: float,
+    landmark_roll: float,
+) -> dict[str, float]:
+    return {
+        "rawPnPYaw": float(raw_yaw),
+        "landmarkYaw": float(landmark_yaw),
+        "noseOffset": float(nose_offset),
+        "rawPnPRoll": float(raw_roll),
+        "landmarkRoll": float(landmark_roll),
+    }
+
+
+def clamp(value: float, min_value: float, max_value: float) -> float:
+    return max(min_value, min(max_value, value))
 
 
 def normalize_pitch_angle(pitch: float) -> float:
@@ -612,6 +671,14 @@ def normalize_pitch_angle(pitch: float) -> float:
     if pitch < -90.0:
         return pitch + 180.0
     return pitch
+
+
+def normalize_roll_angle(roll: float) -> float:
+    while roll > 90.0:
+        roll -= 180.0
+    while roll < -90.0:
+        roll += 180.0
+    return roll
 
 
 def compute_eye_aspect_ratio(image: np.ndarray, landmarks) -> float:

@@ -58,7 +58,7 @@ app.MapPost("/api/face/verify", async (HttpRequest request, AiWorkerClient aiCli
     return result.Ok ? Results.Ok(result) : Results.BadRequest(result);
 });
 
-app.MapPost("/api/session/start", async (SessionStore store, HttpContext context) =>
+app.MapPost("/api/session/start", async (SessionStore store, HttpContext context, IOptions<LivenessOptions> options) =>
 {
     StartSessionRequest? request = null;
     try
@@ -71,7 +71,7 @@ app.MapPost("/api/session/start", async (SessionStore store, HttpContext context
     }
 
     var employeeId = string.IsNullOrWhiteSpace(request?.EmployeeId) ? "EMP001" : request.EmployeeId.Trim();
-    var session = store.Create(employeeId);
+    var session = store.Create(employeeId, options.Value.MaxSessionSeconds);
     var scheme = context.Request.IsHttps ? "wss" : "ws";
     var wsUrl = $"{scheme}://{context.Request.Host}/ws/attendance-liveness?sessionId={session.SessionId}";
 
@@ -233,7 +233,7 @@ public sealed class AiWorkerOptions
 public sealed class LivenessOptions
 {
     public int FrameUploadFps { get; set; } = 6;
-    public int MaxSessionSeconds { get; set; } = 35;
+    public int MaxSessionSeconds { get; set; } = 45;
     public double MinLivenessScore { get; set; } = 0.55;
     public double MaxSpoofScore { get; set; } = 0.55;
     public string PassiveSpoofMode { get; set; } = "Warn";
@@ -243,8 +243,8 @@ public sealed class LivenessOptions
     public int FaceMismatchWarmupFrames { get; set; } = 3;
     public int FaceMismatchFailFrames { get; set; } = 3;
     public int CenterFaceFrames { get; set; } = 8;
-    public int TurnFrames { get; set; } = 4;
-    public double YawDegrees { get; set; } = 15.0;
+    public int TurnFrames { get; set; } = 2;
+    public double YawDegrees { get; set; } = 8.0;
     public int BlinkCount { get; set; } = 2;
     public bool StrictPassiveSpoof => string.Equals(PassiveSpoofMode, "Strict", StringComparison.OrdinalIgnoreCase);
 }
@@ -377,10 +377,10 @@ public sealed class SessionStore
 {
     private readonly ConcurrentDictionary<string, LivenessSession> _sessions = new();
 
-    public LivenessSession Create(string employeeId)
+    public LivenessSession Create(string employeeId, int maxSessionSeconds)
     {
         var steps = ChallengeFactory.CreateRandom();
-        var session = new LivenessSession($"att_{DateTimeOffset.UtcNow:yyyyMMddHHmmss}_{Guid.NewGuid():N}"[..36], employeeId, steps);
+        var session = new LivenessSession($"att_{DateTimeOffset.UtcNow:yyyyMMddHHmmss}_{Guid.NewGuid():N}"[..36], employeeId, steps, maxSessionSeconds);
         _sessions[session.SessionId] = session;
         return session;
     }
@@ -412,12 +412,12 @@ public static class ChallengeFactory
 
 public sealed class LivenessSession
 {
-    public LivenessSession(string sessionId, string employeeId, IReadOnlyList<ChallengeStep> steps)
+    public LivenessSession(string sessionId, string employeeId, IReadOnlyList<ChallengeStep> steps, int maxSessionSeconds)
     {
         SessionId = sessionId;
         EmployeeId = employeeId;
         Steps = steps;
-        ExpiresAt = DateTimeOffset.UtcNow.AddSeconds(35);
+        ExpiresAt = DateTimeOffset.UtcNow.AddSeconds(Math.Max(15, maxSessionSeconds));
     }
 
     public string SessionId { get; }
@@ -436,6 +436,8 @@ public sealed class LivenessSession
     public bool PreviousEyesOpen { get; private set; } = true;
     public double BestLivenessScore { get; private set; }
     public double WorstSpoofScore { get; private set; }
+    public double CenterYawBaseline { get; private set; }
+    public int CenterYawSampleCount { get; private set; }
     public int ConsecutiveSpoofRiskFrames { get; private set; }
     public int ConsecutiveFaceMismatchFrames { get; private set; }
     public AiFrameAnalysis? LastAnalysis { get; private set; }
@@ -519,19 +521,25 @@ public sealed class LivenessSession
 
         var step = CurrentStep;
         var stepOk = false;
+        var yawDelta = analysis.Yaw - CenterYawBaseline;
 
         switch (step.Type)
         {
             case ChallengeStepType.CenterFace:
                 stepOk = Math.Abs(analysis.Yaw) < 12 && Math.Abs(analysis.Pitch) < 35;
+                if (stepOk)
+                {
+                    UpdateCenterYawBaseline(analysis.Yaw);
+                    yawDelta = analysis.Yaw - CenterYawBaseline;
+                }
                 break;
 
             case ChallengeStepType.TurnLeft:
-                stepOk = analysis.Yaw <= -options.YawDegrees;
+                stepOk = yawDelta <= -options.YawDegrees;
                 break;
 
             case ChallengeStepType.TurnRight:
-                stepOk = analysis.Yaw >= options.YawDegrees;
+                stepOk = yawDelta >= options.YawDegrees;
                 break;
 
             case ChallengeStepType.BlinkTwice:
@@ -546,9 +554,15 @@ public sealed class LivenessSession
                 break;
         }
 
+        AddYawMetrics(analysis, yawDelta);
+
         if (stepOk)
         {
             CurrentSatisfiedFrames++;
+        }
+        else if (IsTurnStep(step.Type))
+        {
+            CurrentSatisfiedFrames = Math.Max(0, CurrentSatisfiedFrames - 1);
         }
         else if (step.Type != ChallengeStepType.BlinkTwice)
         {
@@ -586,6 +600,24 @@ public sealed class LivenessSession
         }
 
         return Decision.Progress("RUNNING", step.Instruction);
+    }
+
+    private static bool IsTurnStep(ChallengeStepType type) =>
+        type is ChallengeStepType.TurnLeft or ChallengeStepType.TurnRight;
+
+    private void UpdateCenterYawBaseline(double yaw)
+    {
+        CenterYawSampleCount++;
+        var alpha = CenterYawSampleCount == 1 ? 1.0 : 0.25;
+        CenterYawBaseline += (yaw - CenterYawBaseline) * alpha;
+    }
+
+    private void AddYawMetrics(AiFrameAnalysis analysis, double yawDelta)
+    {
+        analysis.Metrics ??= new Dictionary<string, double>();
+        analysis.Metrics["centerYawBaseline"] = CenterYawBaseline;
+        analysis.Metrics["centerYawSampleCount"] = CenterYawSampleCount;
+        analysis.Metrics["yawDelta"] = yawDelta;
     }
 }
 
